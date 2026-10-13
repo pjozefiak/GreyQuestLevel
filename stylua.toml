@@ -1,0 +1,14 @@
+# Tuned to match GrayQuestLevel.lua's existing style rather than impose a new
+# one: spaces (not StyLua's default tabs) and simple statements left collapsed,
+# because the source leans on the `if cond then return x end` one-liner idiom.
+#
+# Even so, `stylua .` still rewrites ~120 lines of this file -- it unaligns the
+# trailing comments and reflows hand-wrapped `or` chains and :format() calls.
+# That is why scripts/lint.sh does NOT run stylua --check. Use it on new files;
+# do not bulk-format GrayQuestLevel.lua.
+column_width = 120
+indent_type = "Spaces"
+indent_width = 4
+quote_style = "AutoPreferDouble"
+call_parentheses = "Always"
+collapse_simple_statement = "Always"

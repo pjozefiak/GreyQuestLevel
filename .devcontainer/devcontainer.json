@@ -1,0 +1,44 @@
+{
+  "name": "WoW Addon",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "sumneko.lua",
+        "ketho.wow-api",
+        "JohnnyMorganz.stylua",
+        "dwenegar.vscode-luacheck",
+        "EditorConfig.EditorConfig"
+      ],
+      "settings": {
+        "Lua.runtime.version": "Lua 5.1",
+        "stylua.styluaPath": "/usr/local/bin/stylua",
+        "luacheck.luacheckPath": "/usr/local/bin/luacheck",
+        "[lua]": {
+          "editor.defaultFormatter": "JohnnyMorganz.stylua",
+          "editor.formatOnSave": true
+        }
+      }
+    }
+  },
+  "mounts": [
+    "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind,consistency=cached"
+    // Optional: live-mount the addon into your WoW install so /reload picks up edits.
+    // Set WOW_ADDONS_PATH on the host first (see README.md), then uncomment:
+    // ,"source=${localEnv:WOW_ADDONS_PATH},target=/wow-addons,type=bind,consistency=cached"
+  ],
+  "containerEnv": {
+    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
+    "ANTHROPIC_MODEL": "claude-opus-5",
+    "LUA_VERSION": "5.1"
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "remoteUser": "vscode"
+}

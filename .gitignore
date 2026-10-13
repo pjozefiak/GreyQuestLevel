@@ -1,0 +1,26 @@
+# Build output from scripts/package.sh
+dist/
+
+# Lua: luac leftovers if it is ever run without -p
+luac.out
+*.luac
+
+# macOS / Windows cruft (there are already .DS_Store files at the root and in
+# .devcontainer -- both untracked, so this catches them before the first commit)
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor backups
+*~
+*.swp
+
+# VS Code: settings.json is shared on purpose -- it pins the Lua language
+# server to 5.1 and points it at the ketho.wow-api annotations, which the
+# devcontainer installs. Ignore everything else, which is local state.
+.vscode/*
+!.vscode/settings.json
+
+# Claude Code: CLAUDE.md is team-shared and committed; these are personal.
+CLAUDE.local.md
+.claude/settings.local.json

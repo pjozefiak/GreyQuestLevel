@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "runtime.version": "Lua 5.1",
+  "workspace.checkThirdParty": false,
+  "diagnostics.globals": [
+    "SLASH_MYADDON1",
+    "SLASH_MYADDON2"
+  ],
+  "diagnostics.disable": ["lowercase-global"],
+  "format.enable": false
+}

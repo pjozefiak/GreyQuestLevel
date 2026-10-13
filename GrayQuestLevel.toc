@@ -1,0 +1,8 @@
+## Interface: 16001, 120105
+## Title: Gray Quest Level
+## Notes: Shows where green quests turn gray, and kills to next level.
+## Author: you
+## Version: 1.4
+## SavedVariables: GrayQuestLevelDB
+
+GrayQuestLevel.lua
