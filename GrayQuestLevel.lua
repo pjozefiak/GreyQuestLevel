@@ -6,8 +6,71 @@
 
 local ADDON_NAME = ...
 
-GrayQuestLevelDB = GrayQuestLevelDB or {}      -- account-wide: position, source, offset
-GrayQuestLevelCharDB = GrayQuestLevelCharDB or {} -- per character: the challenge state
+GrayQuestLevelDB = GrayQuestLevelDB or {}         -- account-wide: source, offset, lastGain
+GrayQuestLevelCharDB = GrayQuestLevelCharDB or {} -- per character: position, challenge state
+
+-- The box position used to be account-wide. It is per character now, because a
+-- character with a different UI wants the box somewhere else. Seed each
+-- character from the old account-wide value once, then let them diverge -- the
+-- flag is what stops a later `/gql reset` being undone by this on next login.
+if GrayQuestLevelDB.pos and not GrayQuestLevelCharDB.posMigrated then
+    GrayQuestLevelCharDB.pos = GrayQuestLevelDB.pos
+    GrayQuestLevelCharDB.posMigrated = true
+end
+
+-- An earlier build learned quest XP into saved variables. QuestXP.lua is the
+-- only source now, so drop the orphaned table rather than leave it on disk.
+GrayQuestLevelDB.questXP = nil
+
+-- ---------------------------------------------------------------------------
+-- Chat output
+-- ---------------------------------------------------------------------------
+-- Everything the addon says goes through Say(), so it can be routed to one
+-- chat window instead of whichever one is default. Per character, because chat
+-- layouts are per character.
+
+local refreshOptions -- set by the options panel below, if it could be built
+
+local function ChatFrameFor(index)
+    index = tonumber(index)
+    if not index then return nil end
+    local f = _G["ChatFrame" .. index]
+    -- Checked on every call: a window can be closed after being chosen.
+    if type(f) == "table" and type(f.AddMessage) == "function" then return f end
+end
+
+local function Say(msg)
+    local target = ChatFrameFor(GrayQuestLevelCharDB.chatFrame)
+    if target and pcall(target.AddMessage, target, msg) then return end
+    print(msg) -- the default window, and the fallback if the chosen one is gone
+end
+
+-- The windows this client actually has. GetChatWindowInfo returns an empty name
+-- for unused slots, and the frame itself may not exist on this build.
+local function ChatWindows()
+    local list = {}
+    for i = 1, (tonumber(NUM_CHAT_WINDOWS) or 10) do
+        local ok, name, _, _, _, _, _, shown, _, docked = pcall(GetChatWindowInfo, i)
+        if ok and type(name) == "string" and name ~= "" and ChatFrameFor(i) then
+            list[#list + 1] = { index = i, name = name, open = (shown or docked) and true or false }
+        end
+    end
+    return list
+end
+
+local function ChatTargetName()
+    local index = tonumber(GrayQuestLevelCharDB.chatFrame)
+    if not index then return "default" end
+    for _, w in ipairs(ChatWindows()) do
+        if w.index == index then return w.name end
+    end
+    return ("window %d"):format(index)
+end
+
+local function SetChatFrame(index)
+    GrayQuestLevelCharDB.chatFrame = tonumber(index)
+    if refreshOptions then pcall(refreshOptions) end
+end
 
 -- ---------------------------------------------------------------------------
 -- Safe reads
@@ -266,6 +329,25 @@ local function Grinding()
     return GrayQuestLevelCharDB.grinding == true
 end
 
+-- Full (un-reduced) quest XP, keyed by quest ID. One source: the table in
+-- QuestXP.lua, maintained by hand. Nothing is ever written back -- a value is
+-- either in that file or it is not, which is why a gray quest that is missing
+-- from it gets reported rather than guessed at.
+--
+-- QuestXP.lua is read at load, so edits need a /reload to take effect.
+local function KnownQuestXP(questID)
+    if not questID or type(GrayQuestLevelQuestXP) ~= "table" then return nil end
+    return tonumber(GrayQuestLevelQuestXP[questID])
+end
+
+local function CountQuestXP()
+    local count = 0
+    if type(GrayQuestLevelQuestXP) == "table" then
+        for _ in pairs(GrayQuestLevelQuestXP) do count = count + 1 end
+    end
+    return count
+end
+
 -- QUEST_TURNED_IN fires after the quest has already left the log, so its level
 -- has to be remembered while it is still there. Rebuilt on login and on accept
 -- rather than on QUEST_LOG_UPDATE, which fires far too often to scan on.
@@ -330,7 +412,7 @@ end
 
 local function ApplyPosition()
     frame:ClearAllPoints()
-    local p = GrayQuestLevelDB.pos
+    local p = GrayQuestLevelCharDB.pos
     if p then
         frame:SetPoint(p[1], UIParent, p[2], p[3], p[4])
     else
@@ -344,7 +426,8 @@ end)
 frame:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing()
     local point, _, relPoint, x, y = self:GetPoint()
-    GrayQuestLevelDB.pos = { point, relPoint, x, y }
+    GrayQuestLevelCharDB.pos = { point, relPoint, x, y }
+    GrayQuestLevelCharDB.posMigrated = true
 end)
 
 frame:SetScript("OnEnter", function(self)
@@ -406,6 +489,119 @@ local function Update()
 end
 
 -- ---------------------------------------------------------------------------
+-- Options panel: Esc -> Options -> AddOns -> Gray Quest Level
+-- ---------------------------------------------------------------------------
+-- Entirely optional. `/gql chat` does the same job with no UI APIs at all, so
+-- every step here is allowed to fail: a build without these APIs just gets no
+-- panel. Blizzard moved addon options to Settings.* in 10.0 and replaced
+-- UIDropDownMenu with Blizzard_Menu in 11.0, so both dropdowns are attempted.
+
+local optionsCategory
+
+local function SafeCreateFrame(...)
+    local ok, f = pcall(CreateFrame, ...)
+    if ok then return f end
+end
+
+-- 11.0+ : a DropdownButton whose menu is described by SetupMenu.
+local function SetupModernDropdown(dd)
+    if type(dd.SetupMenu) ~= "function" then return false end
+    return (pcall(dd.SetupMenu, dd, function(_, root)
+        root:CreateRadio("Default chat window",
+            function() return GrayQuestLevelCharDB.chatFrame == nil end,
+            function() SetChatFrame(nil) end)
+        for _, w in ipairs(ChatWindows()) do
+            local index = w.index -- captured per entry, not per loop
+            root:CreateRadio(w.name,
+                function() return GrayQuestLevelCharDB.chatFrame == index end,
+                function() SetChatFrame(index) end)
+        end
+    end))
+end
+
+-- Pre-11.0 fallback.
+local function SetupLegacyDropdown(dd)
+    if type(UIDropDownMenu_Initialize) ~= "function" then return false end
+    local ok = pcall(UIDropDownMenu_Initialize, dd, function()
+        UIDropDownMenu_AddButton({
+            text = "Default chat window",
+            checked = GrayQuestLevelCharDB.chatFrame == nil,
+            func = function() SetChatFrame(nil) end,
+        })
+        for _, w in ipairs(ChatWindows()) do
+            local index = w.index
+            UIDropDownMenu_AddButton({
+                text = w.name,
+                checked = GrayQuestLevelCharDB.chatFrame == index,
+                func = function() SetChatFrame(index) end,
+            })
+        end
+    end)
+    if ok then pcall(UIDropDownMenu_SetWidth, dd, 160) end
+    return ok
+end
+
+local function BuildOptions()
+    if optionsCategory then return true end
+    if type(Settings) ~= "table"
+        or type(Settings.RegisterCanvasLayoutCategory) ~= "function"
+        or type(Settings.RegisterAddOnCategory) ~= "function" then
+        return false
+    end
+
+    local panel = SafeCreateFrame("Frame")
+    if not panel then return false end
+    panel.name = "Gray Quest Level"
+
+    local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", 16, -16)
+    title:SetText("Gray Quest Level")
+
+    local note = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    note:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -8)
+    note:SetText("Which chat window this addon prints to. Saved per character.")
+
+    local dd = SafeCreateFrame("DropdownButton", nil, panel, "WowStyle1DropdownTemplate")
+    local wired = dd and SetupModernDropdown(dd)
+    if not wired then
+        dd = SafeCreateFrame("Frame", "GrayQuestLevelChatDropdown", panel, "UIDropDownMenuTemplate")
+        wired = dd and SetupLegacyDropdown(dd)
+    end
+    if dd then
+        pcall(dd.SetPoint, dd, "TOPLEFT", note, "BOTTOMLEFT", -16, -16)
+        pcall(dd.SetSize, dd, 200, 32)
+    end
+
+    -- Keep the closed dropdown's label in step with the setting, however it
+    -- was changed -- the slash command bypasses the panel entirely.
+    refreshOptions = function()
+        if not dd then return end
+        local label = ChatTargetName()
+        if not pcall(dd.SetDefaultText, dd, label) then
+            pcall(UIDropDownMenu_SetText, dd, label)
+        end
+    end
+
+    local ok, category = pcall(Settings.RegisterCanvasLayoutCategory, panel, panel.name)
+    if not ok or not category then return false end
+    if not pcall(Settings.RegisterAddOnCategory, category) then return false end
+
+    optionsCategory = category
+    if wired then refreshOptions() end
+    return true
+end
+
+local function OpenOptions()
+    if not optionsCategory then return false end
+    if type(Settings) == "table" and type(Settings.OpenToCategory) == "function" then
+        if pcall(Settings.OpenToCategory, optionsCategory) then return true end
+        local ok, id = pcall(optionsCategory.GetID, optionsCategory)
+        if ok and pcall(Settings.OpenToCategory, id) then return true end
+    end
+    return false
+end
+
+-- ---------------------------------------------------------------------------
 -- Events
 -- ---------------------------------------------------------------------------
 
@@ -424,7 +620,7 @@ local function ApplyGrind(gain)
 
     local after = SetStoredXP(before - gain)
     if after == 0 then
-        print("|cff40c040Gray Quest Level|r: stored EXP cleared - debt paid off.")
+        Say("|cff40c040Gray Quest Level|r: stored EXP cleared - debt paid off.")
     end
 end
 
@@ -434,19 +630,41 @@ local function OnQuestTurnedIn(questID, xpReward)
     -- otherwise the flag would linger and swallow the next kill.
     if xpReward > 0 then pendingQuestXP = true end
 
-    GrayQuestLevelCharDB.lastQuestXP = xpReward
     local level = questID and questLevels[questID]
+    GrayQuestLevelCharDB.lastQuestXP = xpReward
     GrayQuestLevelCharDB.lastQuestLevel = level
+    GrayQuestLevelCharDB.lastQuestID = questID
+    GrayQuestLevelCharDB.lastQuestSettled = false
     if questID then questLevels[questID] = nil end
 
-    -- Speak up only for gray quests: that is the only case where the award was
-    -- reduced and the challenge owes you the difference.
+    -- Only gray quests are reduced, so only they owe anything.
     local _, _, highestGray = Compute()
     if not level or not highestGray or level > highestGray then return end
 
-    print(("|cff40c040Gray Quest Level|r: gray quest (level %d) paid |cffffd100%d|r XP.")
-        :format(level, xpReward))
-    print("  The API has no un-reduced value - |cffffd100/gql quest <full XP>|r to store the difference.")
+    -- Missing from QuestXP.lua: say so, with the ID and what it paid, so the
+    -- entry can be added. This is the only prompt the addon ever gives.
+    local full = KnownQuestXP(questID)
+    if not full then
+        Say(("|cff40c040Gray Quest Level|r: gray quest |cffffd100%s|r (level %d) paid %d XP"
+            .. " - not in QuestXP.lua.")
+            :format(tostring(questID), level, xpReward))
+        Say(("  Add |cffffd100[%s] = <full XP>|r to QuestXP.lua (then /reload),"
+            .. " or /gql quest <full XP> to count it now."):format(tostring(questID)))
+        return
+    end
+
+    GrayQuestLevelCharDB.lastQuestSettled = true
+    local owed = full - xpReward
+    if owed <= 0 then
+        Say(("|cff40c040Gray Quest Level|r: gray quest paid %d of its %d value - nothing owed.")
+            :format(xpReward, full))
+        return
+    end
+
+    local after = SetStoredXP(StoredXP() + owed)
+    Say(("|cff40c040Gray Quest Level|r: gray quest (level %d): %d full - %d paid = |cffffd100%d|r stored.")
+        :format(level, full, xpReward, owed))
+    Say(("  Stored EXP now %d."):format(after))
 end
 
 local function SafeRegister(event)
@@ -466,6 +684,7 @@ SafeRegister("QUEST_ACCEPTED")
 frame:SetScript("OnEvent", function(_, event, arg1, arg2)
     if event == "PLAYER_ENTERING_WORLD" then
         ApplyPosition()
+        BuildOptions() -- first call registers it; later ones are a no-op
         CacheQuestLevels()
         SampleXP() -- establish the baseline; no gain recorded from this one
         Update()
@@ -514,9 +733,10 @@ SlashCmdList.GRAYQUESTLEVEL = function(msg)
 
     if cmd == "lock" then
         GrayQuestLevelDB.locked = not GrayQuestLevelDB.locked
-        print("|cff40c040Gray Quest Level|r: " .. (GrayQuestLevelDB.locked and "locked" or "unlocked"))
+        Say("|cff40c040Gray Quest Level|r: " .. (GrayQuestLevelDB.locked and "locked" or "unlocked"))
     elseif cmd == "reset" then
-        GrayQuestLevelDB.pos = nil
+        GrayQuestLevelCharDB.pos = nil
+        GrayQuestLevelCharDB.posMigrated = true -- don't re-seed from the old account value
         ApplyPosition()
     elseif cmd == "hide" then
         frame:Hide()
@@ -528,28 +748,28 @@ SlashCmdList.GRAYQUESTLEVEL = function(msg)
         if rest == "off" or rest == "reset" then
             GrayQuestLevelDB.offset = 0
             Update()
-            print("|cff40c040Gray Quest Level|r: offset cleared.")
+            Say("|cff40c040Gray Quest Level|r: offset cleared.")
         elseif not observed then
-            print("|cff40c040Gray Quest Level|r: usage /gql calibrate <highest gray level you see>,"
+            Say("|cff40c040Gray Quest Level|r: usage /gql calibrate <highest gray level you see>,"
                 .. " or /gql calibrate off")
         else
             GrayQuestLevelDB.offset = 0
             local _, _, computed, source = Compute()
             if not computed then
-                print("|cff40c040Gray Quest Level|r: nothing to calibrate against on this client.")
+                Say("|cff40c040Gray Quest Level|r: nothing to calibrate against on this client.")
             elseif source == "colors" and computed ~= observed then
                 -- Don't paper over this. The colour API is what the quest log
                 -- colours with, so a disagreement is a real finding, not
                 -- something to hide behind a fudge factor.
-                print(("|cff40c040Gray Quest Level|r: the game's own colour API says gray %d, you see gray %d.")
+                Say(("|cff40c040Gray Quest Level|r: the game's own colour API says gray %d, you see gray %d.")
                     :format(computed, observed))
-                print("  That shouldn't happen - please report it. Offset NOT applied.")
+                Say("  That shouldn't happen - please report it. Offset NOT applied.")
             elseif source == "colors" then
-                print("|cff40c040Gray Quest Level|r: already matches your quest log, nothing to correct.")
+                Say("|cff40c040Gray Quest Level|r: already matches your quest log, nothing to correct.")
             else
                 GrayQuestLevelDB.offset = observed - computed
                 Update()
-                print(("|cff40c040Gray Quest Level|r: %s calibrated, offset %+d.")
+                Say(("|cff40c040Gray Quest Level|r: %s calibrated, offset %+d.")
                     :format(tostring(source), GrayQuestLevelDB.offset))
             end
         end
@@ -557,18 +777,18 @@ SlashCmdList.GRAYQUESTLEVEL = function(msg)
         -- Signed: /gql exp 100 adds, /gql exp -767 removes.
         local n = tonumber(rest)
         if rest == "" then
-            print(("|cff40c040Gray Quest Level|r: stored EXP %d, grinding %s.")
+            Say(("|cff40c040Gray Quest Level|r: stored EXP %d, grinding %s.")
                 :format(StoredXP(), Grinding() and "on" or "off"))
         elseif not n then
-            print("|cff40c040Gray Quest Level|r: usage /gql exp <+/-amount>")
+            Say("|cff40c040Gray Quest Level|r: usage /gql exp <+/-amount>")
         else
             local before = StoredXP()
             local after = SetStoredXP(before + n)
             Update()
-            print(("|cff40c040Gray Quest Level|r: stored EXP %d %+d -> |cffffd100%d|r.")
+            Say(("|cff40c040Gray Quest Level|r: stored EXP %d %+d -> |cffffd100%d|r.")
                 :format(before, n, after))
             if after == 0 and before + n < 0 then
-                print("  (clamped at zero)")
+                Say("  (clamped at zero)")
             end
         end
     elseif cmd == "quest" then
@@ -576,71 +796,129 @@ SlashCmdList.GRAYQUESTLEVEL = function(msg)
         local full = tonumber(rest)
         local awarded = tonumber(GrayQuestLevelCharDB.lastQuestXP)
         if not full then
-            print("|cff40c040Gray Quest Level|r: usage /gql quest <full XP the quest is worth>")
+            Say("|cff40c040Gray Quest Level|r: usage /gql quest <full XP the quest is worth>")
             if awarded then
-                print(("  last hand-in paid %d XP%s"):format(awarded,
+                Say(("  last hand-in paid %d XP%s"):format(awarded,
                     GrayQuestLevelCharDB.lastQuestLevel
                         and (" (level %d)"):format(GrayQuestLevelCharDB.lastQuestLevel) or ""))
             end
         elseif not awarded then
-            print("|cff40c040Gray Quest Level|r: no quest hand-in recorded yet - use /gql exp <n> instead.")
+            Say("|cff40c040Gray Quest Level|r: no quest hand-in recorded yet - use /gql exp <n> instead.")
+        elseif GrayQuestLevelCharDB.lastQuestSettled then
+            -- The value was already known, so the debt is already stored.
+            -- Counting it again here would double it.
+            Say("|cff40c040Gray Quest Level|r: that hand-in was already settled from the quest-XP table.")
+            Say("  Use /gql exp <n> if the stored amount needs correcting.")
         elseif full - awarded <= 0 then
-            print(("|cff40c040Gray Quest Level|r: %d is not more than the %d already paid - nothing owed.")
+            Say(("|cff40c040Gray Quest Level|r: %d is not more than the %d already paid - nothing owed.")
                 :format(full, awarded))
         else
             local owed = full - awarded
             local after = SetStoredXP(StoredXP() + owed)
+            GrayQuestLevelCharDB.lastQuestSettled = true
             Update()
-            print(("|cff40c040Gray Quest Level|r: %d full - %d paid = |cffffd100%d|r stored (total %d).")
+            Say(("|cff40c040Gray Quest Level|r: %d full - %d paid = |cffffd100%d|r stored (total %d).")
                 :format(full, awarded, owed, after))
+            -- Counted for this hand-in only; nothing is written back.
+            if GrayQuestLevelCharDB.lastQuestID then
+                Say(("  Add |cffffd100[%s] = %d|r to QuestXP.lua to keep it.")
+                    :format(tostring(GrayQuestLevelCharDB.lastQuestID), full))
+            end
+        end
+    elseif cmd == "xpdb" then
+        if rest == "" then
+            Say(("|cff40c040Gray Quest Level|r: QuestXP.lua holds |cffffd100%d|r quest values.")
+                :format(CountQuestXP()))
+            Say("  /gql xpdb <questID> to look one up. Edits to the file need a /reload.")
+        else
+            local id = tonumber(rest)
+            local full = KnownQuestXP(id)
+            if not id then
+                Say("|cff40c040Gray Quest Level|r: usage /gql xpdb [questID]")
+            elseif full then
+                Say(("|cff40c040Gray Quest Level|r: quest %d is worth %d XP."):format(id, full))
+            else
+                Say(("|cff40c040Gray Quest Level|r: quest %d is not in QuestXP.lua."):format(id))
+            end
         end
     elseif cmd == "grind" then
         GrayQuestLevelCharDB.grinding = not Grinding()
         Update()
         if Grinding() then
-            print(("|cff40c040Gray Quest Level|r: grinding ON - XP now pays off the %d stored.")
+            Say(("|cff40c040Gray Quest Level|r: grinding ON - XP now pays off the %d stored.")
                 :format(StoredXP()))
         else
-            print("|cff40c040Gray Quest Level|r: grinding OFF - stored EXP frozen.")
+            Say("|cff40c040Gray Quest Level|r: grinding OFF - stored EXP frozen.")
+        end
+    elseif cmd == "chat" then
+        local windows = ChatWindows()
+        if rest == "default" or rest == "reset" then
+            SetChatFrame(nil)
+            Say("|cff40c040Gray Quest Level|r: printing to the default chat window.")
+        elseif rest == "" then
+            Say(("|cff40c040Gray Quest Level|r: printing to |cffffd100%s|r. Windows:")
+                :format(ChatTargetName()))
+            if #windows == 0 then
+                Say("  none readable on this client - the default window is all there is.")
+            end
+            for _, w in ipairs(windows) do
+                Say(("  %d: %s%s"):format(w.index, w.name, w.open and "" or " (closed)"))
+            end
+            Say("  /gql chat <number> | /gql chat default")
+        elseif not tonumber(rest) then
+            Say("|cff40c040Gray Quest Level|r: usage /gql chat <number> | default")
+        elseif not ChatFrameFor(rest) then
+            Say(("|cff40c040Gray Quest Level|r: there is no chat window %s."):format(rest))
+        else
+            SetChatFrame(rest)
+            -- Said in the new window, so it doubles as proof the routing works.
+            Say(("|cff40c040Gray Quest Level|r: now printing here (%s)."):format(ChatTargetName()))
+        end
+    elseif cmd == "options" or cmd == "config" then
+        if not OpenOptions() then
+            Say("|cff40c040Gray Quest Level|r: no options panel on this client - use /gql chat.")
         end
     elseif cmd == "source" then
         if rest == "auto" or rest == "table" or rest == "range" or rest == "colors" then
             GrayQuestLevelDB.source = rest
             Update()
             local _, lowestGreen, highestGray = Compute()
-            print(("|cff40c040Gray Quest Level|r: source %s -> green %s+, gray %s-")
+            Say(("|cff40c040Gray Quest Level|r: source %s -> green %s+, gray %s-")
                 :format(rest, tostring(lowestGreen), tostring(highestGray)))
         else
-            print("|cff40c040Gray Quest Level|r: usage /gql source auto | table | range | colors")
-            print(("  currently: %s"):format(tostring(GrayQuestLevelDB.source or "auto")))
+            Say("|cff40c040Gray Quest Level|r: usage /gql source auto | table | range | colors")
+            Say(("  currently: %s"):format(tostring(GrayQuestLevelDB.source or "auto")))
         end
     elseif cmd == "debug" then
         local level = PlayerLevel()
-        print(("|cff40c040Gray Quest Level|r debug - player level %d"):format(level))
-        print(("  UnitLevel: %s | UnitEffectiveLevel: %s"):format(
+        Say(("|cff40c040Gray Quest Level|r debug - player level %d"):format(level))
+        Say(("  UnitLevel: %s | UnitEffectiveLevel: %s"):format(
             tostring(SafeNumber(UnitLevel, "player")),
             tostring(SafeNumber(UnitEffectiveLevel, "player"))))
         for i = 1, #RANGE_FUNCS do
             local name = RANGE_FUNCS[i]
-            print(("  %s: %s"):format(name,
+            Say(("  %s: %s"):format(name,
                 type(_G[name]) ~= "function" and "absent" or tostring(SafeNumber(_G[name], "player"))))
         end
-        print(("  GetQuestDifficultyColor: %s"):format(
+        Say(("  GetQuestDifficultyColor: %s"):format(
             type(GetQuestDifficultyColor) == "function" and "present" or "absent"))
         local _, lowestGreen, highestGray, source, byTable, byRange, byColors = Compute()
-        print(("  table says gray %s (green %s+)"):format(
+        Say(("  table says gray %s (green %s+)"):format(
             tostring(byTable), byTable and tostring(byTable + 1) or "?"))
-        print(("  range says gray %s (green %s+)"):format(
+        Say(("  range says gray %s (green %s+)"):format(
             tostring(byRange), byRange and tostring(byRange + 1) or "?"))
-        print(("  colors say gray %s (green %s+)"):format(
+        Say(("  colors say gray %s (green %s+)"):format(
             tostring(byColors), byColors and tostring(byColors + 1) or "?"))
         if (byRange and byRange ~= byTable) or (byColors and byColors ~= byTable) then
-            print("  |cffff8800they DISAGREE - whichever matches your quest log is the right one|r")
-            print("  |cffff8800switch with /gql source table | range | colors|r")
+            Say("  |cffff8800they DISAGREE - whichever matches your quest log is the right one|r")
+            Say("  |cffff8800switch with /gql source table | range | colors|r")
         end
-        print(("  offset: %d | preference: %s"):format(
+        Say(("  QuestXP.lua entries: %d"):format(CountQuestXP()))
+        Say(("  chat: %s | options panel: %s"):format(
+            ChatTargetName(), optionsCategory and "registered" or "unavailable"))
+        Say(("  offset: %d | preference: %s"):format(
             tonumber(GrayQuestLevelDB.offset) or 0, tostring(GrayQuestLevelDB.source or "auto")))
-        print(("  using %s -> green %s+, gray %s-"):format(
+        Say(("  using %s -> green %s+, gray %s-"):format(
             tostring(source), tostring(lowestGreen), tostring(highestGray)))
     elseif cmd == "xp" then
         local n = tonumber(rest)
@@ -648,37 +926,37 @@ SlashCmdList.GRAYQUESTLEVEL = function(msg)
             lastGain = n
             GrayQuestLevelDB.lastGain = n
             Update()
-            print(("|cff40c040Gray Quest Level|r: using %d XP per kill until the next XP gain."):format(n))
+            Say(("|cff40c040Gray Quest Level|r: using %d XP per kill until the next XP gain."):format(n))
         else
-            print("|cff40c040Gray Quest Level|r: usage /gql xp <number>")
+            Say("|cff40c040Gray Quest Level|r: usage /gql xp <number>")
         end
     else
         local level, lowestGreen, highestGray = Compute()
         if lowestGreen and highestGray >= 1 then
-            print(("|cff40c040Gray Quest Level|r: you are %d, green down to %d, gray at %d and below.")
+            Say(("|cff40c040Gray Quest Level|r: you are %d, green down to %d, gray at %d and below.")
                 :format(level, lowestGreen, highestGray))
         elseif lowestGreen then
-            print(("|cff40c040Gray Quest Level|r: you are %d, nothing is gray yet."):format(level))
+            Say(("|cff40c040Gray Quest Level|r: you are %d, nothing is gray yet."):format(level))
         else
-            print("|cff40c040Gray Quest Level|r: couldn't read the quest range on this client.")
+            Say("|cff40c040Gray Quest Level|r: couldn't read the quest range on this client.")
         end
 
         local kills, remaining, gain = ComputeKills()
         if kills then
-            print(("  %d XP to go, last gain %d, about %d kills."):format(remaining, gain, kills))
+            Say(("  %d XP to go, last gain %d, about %d kills."):format(remaining, gain, kills))
         elseif remaining == "max level" then
-            print("  At max level.")
+            Say("  At max level.")
         elseif remaining == "xp off" then
-            print("  XP gain is turned off for this character.")
+            Say("  XP gain is turned off for this character.")
         elseif remaining == "no xp data" then
-            print("  This client won't hand over the XP values.")
+            Say("  This client won't hand over the XP values.")
         else
-            print("  No XP gain seen yet this session - kill something, or use /gql xp <number>.")
+            Say("  No XP gain seen yet this session - kill something, or use /gql xp <number>.")
         end
         if StoredXP() > 0 or Grinding() then
-            print(("  Stored EXP: %d, grinding %s."):format(StoredXP(), Grinding() and "ON" or "off"))
+            Say(("  Stored EXP: %d, grinding %s."):format(StoredXP(), Grinding() and "ON" or "off"))
         end
-        print("  /gql grind | exp <+/-n> | quest <full> | lock | reset | hide | show")
-        print("  /gql xp <n> | calibrate <n> | source <s> | debug")
+        Say("  /gql grind | exp <+/-n> | quest <full> | lock | reset | hide | show")
+        Say("  /gql xp <n> | calibrate <n> | source <s> | chat <n> | xpdb | options | debug")
     end
 end

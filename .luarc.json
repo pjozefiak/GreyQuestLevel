@@ -3,8 +3,12 @@
   "runtime.version": "Lua 5.1",
   "workspace.checkThirdParty": false,
   "diagnostics.globals": [
-    "SLASH_MYADDON1",
-    "SLASH_MYADDON2"
+    "SLASH_GRAYQUESTLEVEL1",
+    "SlashCmdList",
+    "GrayQuestLevelDB",
+    "GrayQuestLevelCharDB",
+    "GetQuestDifficultyColor",
+    "QuestDifficultyColors"
   ],
   "diagnostics.disable": ["lowercase-global"],
   "format.enable": false

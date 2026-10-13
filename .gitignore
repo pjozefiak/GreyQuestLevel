@@ -1,6 +1,11 @@
 # Build output from scripts/package.sh
 dist/
 
+# Saved Wowhead pages used as import input for QuestXP.lua. Large, re-downloadable,
+# and the extracted values in QuestXP.lua are what matter. Drop this line if you
+# want the dumps kept for provenance.
+wowhead-dump/
+
 # Lua: luac leftovers if it is ever run without -p
 luac.out
 *.luac

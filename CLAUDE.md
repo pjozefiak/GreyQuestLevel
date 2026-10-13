@@ -12,16 +12,23 @@ which uses the Retail API — see `README.md` for its known quirks.
 ## Checking a change
 
 ```bash
-./scripts/lint.sh          # luacheck + luac5.1 -p; expected to be clean (0 warnings)
+./scripts/lint.sh          # luacheck + luac5.1 -p + the tests; must be clean, exits non-zero
+lua5.1 scripts/test.lua    # just the tests
 ./scripts/package.sh       # build dist/GrayQuestLevel-<version>.zip from the .toc version
 ```
 
 `.luacheckrc` is tuned for this addon, so **any** luacheck warning is a real finding — treat a
 non-clean run as a regression. `lint.sh` deliberately does not run `stylua --check`; see Style.
 
-There is no test suite and nothing can exercise the WoW API outside the game, so a clean lint
-proves only that the code parses and has no undefined globals. Do **not** claim a change works
-— hand it to the user to load in the client and `/reload`.
+`scripts/test.lua` stubs the WoW API and loads the real addon against it, covering the
+gray-level bands, stored-EXP arithmetic, grind gating, row layout and where state is saved.
+**Add a check there for any behaviour change** — the bands in particular are pinned to
+readings measured in game, and a wrong formula still passes at levels 1–9 by coincidence,
+which is how the v1.4 off-by-one survived.
+
+What the tests cannot prove: that the frame draws, that these events exist on this build, or
+that the client agrees with the gray-level table. So do **not** claim a change works — hand it
+to the user to load in the client and `/reload`.
 
 ## Style
 
@@ -45,11 +52,20 @@ These are deliberate, not defensive clutter. Preserve them:
   client doesn't know throws and aborts the whole file load.
 - **`SavedVariables` work.** Earlier beta builds wrote them but never read them back; that is
   fixed. Two DBs, both initialised with the `X = X or {}` idiom at file scope (saved variables
-  are loaded before the addon's Lua runs): `GrayQuestLevelDB` is account-wide (position,
-  source, offset) and `GrayQuestLevelCharDB` is per character (the challenge state). A new
+  are loaded before the addon's Lua runs): `GrayQuestLevelDB` is account-wide (source, offset,
+  lastGain) and `GrayQuestLevelCharDB` is per character (box position, challenge state). A new
   saved table needs a `## SavedVariables*` line in the `.toc` *and* a `.luacheckrc` entry.
+  `GrayQuestLevelDB.pos` is a legacy key kept only to seed new characters once — don't read it
+  for anything else.
 - **Display-only addon** — no secure snippets, no combat log, no aura reads. Keep it that way;
   that's why Midnight-era restrictions don't apply.
+- **Never call `print` directly — use `Say()`.** All output is routed through it so it can go to
+  a chosen chat window (`/gql chat`, or the options panel). `Say` falls back to `print` when no
+  window is set or the chosen one has been closed. The only `print` in the file is that fallback.
+- **The options panel is optional by design.** `Settings.RegisterCanvasLayoutCategory` (10.0+)
+  and `WowStyle1DropdownTemplate`/`SetupMenu` (11.0+) are both probed and `pcall`'d, with
+  `UIDropDownMenu` as a fallback; if none exist the addon just has no panel and `/gql chat`
+  still works. Don't make any feature depend on the panel being present.
 
 ## The gray-level boundary
 
@@ -66,6 +82,21 @@ the same boundary at level 8 and 9 — it didn't move when the character levelle
 `/gql calibrate` deliberately refuses to apply an offset when the active source is `colors` and
 it disagrees with what the user sees — a disagreement there is a real finding, not something to
 paper over.
+
+## Quest XP values
+
+Full (un-reduced) quest XP is not in the API. The single source is
+`GrayQuestLevelQuestXP` in `QuestXP.lua`, maintained by hand and read at load (so edits need a
+`/reload`). **Nothing is ever written back** — no learning, no saved-variable cache. That is a
+deliberate decision: the user wants one file they control, not a hidden store that can drift
+from it. Don't reintroduce caching of quest values.
+
+A gray hand-in whose quest is missing from the file prints the quest ID and what it paid, and
+is the only prompt the addon gives. `lastQuestSettled` guards against double-counting: when a
+hand-in was settled from the file, `/gql quest` must refuse rather than add the debt again.
+
+There is no file I/O in the WoW sandbox — data files must be `.lua` listed in the `.toc`. JSON
+is not an option.
 
 ## When adding a global
 

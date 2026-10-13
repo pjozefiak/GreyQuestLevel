@@ -2,8 +2,9 @@
 ## Title: Gray Quest Level
 ## Notes: Personal Leveling Challenge. Show quest EXP ranges, allow to store EXP values for future grinding
 ## Author: Ludek
-## Version: 0.4.3
+## Version: 0.6.7
 ## SavedVariables: GrayQuestLevelDB
 ## SavedVariablesPerCharacter: GrayQuestLevelCharDB
 
+QuestXP.lua
 GrayQuestLevel.lua

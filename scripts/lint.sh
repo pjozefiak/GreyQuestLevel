@@ -15,3 +15,6 @@ for f in *.lua; do
     luac5.1 -p "$f"
     echo "ok  $f"
 done
+
+echo "== tests =="
+lua5.1 scripts/test.lua

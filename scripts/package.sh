@@ -23,11 +23,13 @@ mkdir -p "$DEST"
 # Ship source only: no VCS, tooling, or build output.
 rsync -a \
   --exclude '.git' \
+  --exclude '.gitignore' \
   --exclude '.github' \
   --exclude '.devcontainer' \
   --exclude '.vscode' \
   --exclude 'dist' \
   --exclude 'scripts' \
+  --exclude 'wowhead-dump' \
   --exclude '.luacheckrc' \
   --exclude '.luarc.json' \
   --exclude 'stylua.toml' \

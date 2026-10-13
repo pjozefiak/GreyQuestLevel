@@ -17,6 +17,12 @@
     "Lua.diagnostics.globals": [
         "SlashCmdList",
         "QuestDifficultyColors",
-        "GetQuestDifficultyColor"
+        "GetQuestDifficultyColor",
+        "NUM_CHAT_WINDOWS",
+        "UIDropDownMenu_Initialize",
+        "UIDropDownMenu_SetWidth",
+        "Settings",
+        "UIDropDownMenu_AddButton",
+        "UIDropDownMenu_SetText"
     ]
 }

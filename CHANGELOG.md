@@ -2,19 +2,25 @@
 
 GreyQuestLevel - personal vibecoded level challenge addon
 
-## [0.4.3] - 13.10.2026
+## [0.6.7] - 13.10.2026
 
 ### Added
 - Grind mode
 - Exp controls
 - Agentic container setup
 - Proper Changelog
+- Addon options panel
+- Selectable chat print frame
+- Quest DB
 
 ### Fixed
 - Auto level range
+- Addon position saved per character
+- Quest DB dumper
 
 ### Changed
 - Proper .toc
+- tests.lua
 
 ## [0.2.4] - 04.10.2026
 

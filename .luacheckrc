@@ -11,6 +11,18 @@ ignore = {
 	"211/ADDON_NAME",   -- `local ADDON_NAME = ...` is the standard addon header
 }
 
+-- The offline test harness defines the client API it is stubbing, so the WoW
+-- globals list above (which makes those names read-only) must not apply to it.
+-- allow_defined lets it assign anything it also declares in the file.
+files["scripts/test.lua"] = {
+	read_globals = {},
+	globals = { "print" }, -- captured so assertions can read what the addon said
+	allow_defined = true,
+	ignore = {
+		"131", -- stubs are read by the addon under test, never by this file
+	},
+}
+
 exclude_files = {
 	".luacheckrc",
 	"Libs/**",      -- vendored libraries (Ace3, LibStub, ...)
@@ -27,7 +39,8 @@ read_globals = {
 
 	-- frames / UI
 	"UIParent", "WorldFrame", "CreateFrame", "GameTooltip", "GameFontNormal",
-	"GameFontHighlight", "ChatFrame1", "DEFAULT_CHAT_FRAME",
+	"GameFontHighlight", "GameFontNormalLarge", "GameFontHighlightSmall",
+	"ChatFrame1", "DEFAULT_CHAT_FRAME", "NUM_CHAT_WINDOWS", "GetChatWindowInfo",
 	"UIDropDownMenu_Initialize", "UIDropDownMenu_SetWidth",
 	"UIDropDownMenu_AddButton", "UIDropDownMenu_SetText",
 	"InterfaceOptions_AddCategory", "StaticPopup_Show", "StaticPopupDialogs",
@@ -67,6 +80,7 @@ read_globals = {
 globals = {
 	"GrayQuestLevelDB",      -- ## SavedVariables in the .toc
 	"GrayQuestLevelCharDB",  -- ## SavedVariablesPerCharacter in the .toc
+	"GrayQuestLevelQuestXP", -- the shipped quest-XP table, set by QuestXP.lua
 	"SLASH_GRAYQUESTLEVEL1", -- how /gql is registered
 	"SlashCmdList",          -- the handler is installed as a field on it
 }
