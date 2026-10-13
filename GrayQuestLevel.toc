@@ -4,5 +4,6 @@
 ## Author: you
 ## Version: 1.4
 ## SavedVariables: GrayQuestLevelDB
+## SavedVariablesPerCharacter: GrayQuestLevelCharDB
 
 GrayQuestLevel.lua

@@ -6,7 +6,8 @@
 
 local ADDON_NAME = ...
 
-GrayQuestLevelDB = GrayQuestLevelDB or {}
+GrayQuestLevelDB = GrayQuestLevelDB or {}      -- account-wide: position, source, offset
+GrayQuestLevelCharDB = GrayQuestLevelCharDB or {} -- per character: the challenge state
 
 -- ---------------------------------------------------------------------------
 -- Safe reads
@@ -232,6 +233,57 @@ local function ComputeKills()
 end
 
 -- ---------------------------------------------------------------------------
+-- Stored EXP (the levelling challenge)
+-- ---------------------------------------------------------------------------
+-- Turning in a gray quest is supposed to cost you: the XP the quest would have
+-- given at level, minus the reduced amount actually awarded, becomes a debt you
+-- have to grind off before the quest "counts".
+--
+-- The full value cannot be read from the API. GetQuestLogRewardXP() returns the
+-- already-reduced amount, and QUEST_TURNED_IN's xpReward argument is what was
+-- actually granted -- the pre-reduction figure is never exposed. Rather than
+-- invert an undocumented reduction curve and be silently wrong, the addon
+-- reports what the quest paid and you supply the full value:
+--
+--   /gql quest <full XP>   -- stores (full - awarded) for the last turn-in
+--   /gql exp <+/-n>        -- adjust the debt by hand
+--
+-- Per character, because the challenge is per character.
+
+local pendingQuestXP -- the next XP gain came from a hand-in, not from grinding
+
+local function StoredXP()
+    return math.max(0, math.floor(tonumber(GrayQuestLevelCharDB.storedXP) or 0))
+end
+
+-- Clamped at zero: the debt is something you pay off, never bank.
+local function SetStoredXP(value)
+    GrayQuestLevelCharDB.storedXP = math.max(0, math.floor(tonumber(value) or 0))
+    return GrayQuestLevelCharDB.storedXP
+end
+
+local function Grinding()
+    return GrayQuestLevelCharDB.grinding == true
+end
+
+-- QUEST_TURNED_IN fires after the quest has already left the log, so its level
+-- has to be remembered while it is still there. Rebuilt on login and on accept
+-- rather than on QUEST_LOG_UPDATE, which fires far too often to scan on.
+local questLevels = {}
+
+local function CacheQuestLevels()
+    if type(C_QuestLog) ~= "table" or type(C_QuestLog.GetNumQuestLogEntries) ~= "function" then return end
+    local ok, count = pcall(C_QuestLog.GetNumQuestLogEntries)
+    if not ok or type(count) ~= "number" then return end
+    for i = 1, count do
+        local ok2, info = pcall(C_QuestLog.GetInfo, i)
+        if ok2 and type(info) == "table" and not info.isHeader and info.questID then
+            questLevels[info.questID] = tonumber(info.level)
+        end
+    end
+end
+
+-- ---------------------------------------------------------------------------
 -- On-screen display
 -- ---------------------------------------------------------------------------
 
@@ -247,11 +299,34 @@ local bg = frame:CreateTexture(nil, "BACKGROUND")
 bg:SetAllPoints()
 bg:SetColorTexture(0, 0, 0, 0.45)
 
+local storedText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
 local questText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-questText:SetPoint("TOP", frame, "TOP", 0, -4)
-
 local killText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-killText:SetPoint("TOP", questText, "BOTTOM", 0, -2)
+
+-- The rows are re-anchored on every update because the Stored EXP line is
+-- absent entirely when the debt is zero, rather than blank.
+local ROW_HEIGHT, ROW_GAP, PADDING = 14, 2, 8
+
+local function LayoutRows()
+    local showStored = StoredXP() > 0
+
+    storedText:ClearAllPoints()
+    questText:ClearAllPoints()
+    killText:ClearAllPoints()
+
+    if showStored then
+        storedText:Show()
+        storedText:SetPoint("TOP", frame, "TOP", 0, -4)
+        questText:SetPoint("TOP", storedText, "BOTTOM", 0, -ROW_GAP)
+    else
+        storedText:Hide()
+        questText:SetPoint("TOP", frame, "TOP", 0, -4)
+    end
+    killText:SetPoint("TOP", questText, "BOTTOM", 0, -ROW_GAP)
+
+    local rows = showStored and 3 or 2
+    frame:SetHeight(PADDING + rows * ROW_HEIGHT + (rows - 1) * ROW_GAP)
+end
 
 local function ApplyPosition()
     frame:ClearAllPoints()
@@ -288,6 +363,13 @@ end)
 frame:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
 local function Update()
+    -- Line 0: the stored-EXP debt, shown only when there is one.
+    local stored = StoredXP()
+    if stored > 0 then
+        storedText:SetText(("Stored EXP: |cffffd100%d|r%s")
+            :format(stored, Grinding() and "  |cff40c040(grinding)|r" or ""))
+    end
+
     -- Line 1: quest levels
     local ok, _, lowestGreen, highestGray = pcall(Compute)
     if not ok or not lowestGreen then
@@ -316,13 +398,56 @@ local function Update()
         end
     end
 
-    frame:SetWidth(math.max(140,
-        math.max(questText:GetStringWidth(), killText:GetStringWidth()) + 20))
+    LayoutRows()
+
+    local widest = math.max(questText:GetStringWidth(), killText:GetStringWidth())
+    if stored > 0 then widest = math.max(widest, storedText:GetStringWidth()) end
+    frame:SetWidth(math.max(140, widest + 20))
 end
 
 -- ---------------------------------------------------------------------------
 -- Events
 -- ---------------------------------------------------------------------------
+
+-- Grinding pays off the debt. Quest XP deliberately does not: the hand-in is
+-- what created the debt, so letting its own XP settle it would cancel out.
+local function ApplyGrind(gain)
+    if not gain or gain <= 0 then return end
+    if pendingQuestXP then
+        pendingQuestXP = nil
+        return
+    end
+    if not Grinding() then return end
+
+    local before = StoredXP()
+    if before <= 0 then return end
+
+    local after = SetStoredXP(before - gain)
+    if after == 0 then
+        print("|cff40c040Gray Quest Level|r: stored EXP cleared - debt paid off.")
+    end
+end
+
+local function OnQuestTurnedIn(questID, xpReward)
+    xpReward = tonumber(xpReward) or 0
+    -- Only claim the next gain is quest XP if the quest actually paid some;
+    -- otherwise the flag would linger and swallow the next kill.
+    if xpReward > 0 then pendingQuestXP = true end
+
+    GrayQuestLevelCharDB.lastQuestXP = xpReward
+    local level = questID and questLevels[questID]
+    GrayQuestLevelCharDB.lastQuestLevel = level
+    if questID then questLevels[questID] = nil end
+
+    -- Speak up only for gray quests: that is the only case where the award was
+    -- reduced and the challenge owes you the difference.
+    local _, _, highestGray = Compute()
+    if not level or not highestGray or level > highestGray then return end
+
+    print(("|cff40c040Gray Quest Level|r: gray quest (level %d) paid |cffffd100%d|r XP.")
+        :format(level, xpReward))
+    print("  The API has no un-reduced value - |cffffd100/gql quest <full XP>|r to store the difference.")
+end
 
 local function SafeRegister(event)
     pcall(frame.RegisterEvent, frame, event) -- unknown events throw on this client
@@ -335,18 +460,26 @@ SafeRegister("UNIT_LEVEL")
 SafeRegister("PLAYER_XP_UPDATE")
 SafeRegister("DISABLE_XP_GAIN")
 SafeRegister("ENABLE_XP_GAIN")
+SafeRegister("QUEST_TURNED_IN")
+SafeRegister("QUEST_ACCEPTED")
 
-frame:SetScript("OnEvent", function(_, event, arg1)
+frame:SetScript("OnEvent", function(_, event, arg1, arg2)
     if event == "PLAYER_ENTERING_WORLD" then
         ApplyPosition()
+        CacheQuestLevels()
         SampleXP() -- establish the baseline; no gain recorded from this one
         Update()
     elseif event == "PLAYER_XP_UPDATE" then
-        SampleXP()
+        ApplyGrind(SampleXP())
         Update()
+    elseif event == "QUEST_TURNED_IN" then
+        pcall(OnQuestTurnedIn, arg1, arg2)
+        Update()
+    elseif event == "QUEST_ACCEPTED" then
+        CacheQuestLevels()
     elseif event == "PLAYER_LEVEL_UP" or event == "PLAYER_LEVEL_CHANGED" then
         pendingLevelUp = true
-        C_Timer.After(0.5, function() SampleXP(); Update() end)
+        C_Timer.After(0.5, function() ApplyGrind(SampleXP()); Update() end)
     elseif event == "UNIT_LEVEL" then
         if arg1 == "player" then C_Timer.After(0.5, Update) end
     else
@@ -420,6 +553,56 @@ SlashCmdList.GRAYQUESTLEVEL = function(msg)
                     :format(tostring(source), GrayQuestLevelDB.offset))
             end
         end
+    elseif cmd == "exp" then
+        -- Signed: /gql exp 100 adds, /gql exp -767 removes.
+        local n = tonumber(rest)
+        if rest == "" then
+            print(("|cff40c040Gray Quest Level|r: stored EXP %d, grinding %s.")
+                :format(StoredXP(), Grinding() and "on" or "off"))
+        elseif not n then
+            print("|cff40c040Gray Quest Level|r: usage /gql exp <+/-amount>")
+        else
+            local before = StoredXP()
+            local after = SetStoredXP(before + n)
+            Update()
+            print(("|cff40c040Gray Quest Level|r: stored EXP %d %+d -> |cffffd100%d|r.")
+                :format(before, n, after))
+            if after == 0 and before + n < 0 then
+                print("  (clamped at zero)")
+            end
+        end
+    elseif cmd == "quest" then
+        -- "the quest I just handed in was really worth <n>" -- store the shortfall.
+        local full = tonumber(rest)
+        local awarded = tonumber(GrayQuestLevelCharDB.lastQuestXP)
+        if not full then
+            print("|cff40c040Gray Quest Level|r: usage /gql quest <full XP the quest is worth>")
+            if awarded then
+                print(("  last hand-in paid %d XP%s"):format(awarded,
+                    GrayQuestLevelCharDB.lastQuestLevel
+                        and (" (level %d)"):format(GrayQuestLevelCharDB.lastQuestLevel) or ""))
+            end
+        elseif not awarded then
+            print("|cff40c040Gray Quest Level|r: no quest hand-in recorded yet - use /gql exp <n> instead.")
+        elseif full - awarded <= 0 then
+            print(("|cff40c040Gray Quest Level|r: %d is not more than the %d already paid - nothing owed.")
+                :format(full, awarded))
+        else
+            local owed = full - awarded
+            local after = SetStoredXP(StoredXP() + owed)
+            Update()
+            print(("|cff40c040Gray Quest Level|r: %d full - %d paid = |cffffd100%d|r stored (total %d).")
+                :format(full, awarded, owed, after))
+        end
+    elseif cmd == "grind" then
+        GrayQuestLevelCharDB.grinding = not Grinding()
+        Update()
+        if Grinding() then
+            print(("|cff40c040Gray Quest Level|r: grinding ON - XP now pays off the %d stored.")
+                :format(StoredXP()))
+        else
+            print("|cff40c040Gray Quest Level|r: grinding OFF - stored EXP frozen.")
+        end
     elseif cmd == "source" then
         if rest == "auto" or rest == "table" or rest == "range" or rest == "colors" then
             GrayQuestLevelDB.source = rest
@@ -492,6 +675,10 @@ SlashCmdList.GRAYQUESTLEVEL = function(msg)
         else
             print("  No XP gain seen yet this session - kill something, or use /gql xp <number>.")
         end
-        print("  /gql lock | reset | hide | show | xp <n> | calibrate <n> | source <s> | debug")
+        if StoredXP() > 0 or Grinding() then
+            print(("  Stored EXP: %d, grinding %s."):format(StoredXP(), Grinding() and "ON" or "off"))
+        end
+        print("  /gql grind | exp <+/-n> | quest <full> | lock | reset | hide | show")
+        print("  /gql xp <n> | calibrate <n> | source <s> | debug")
     end
 end

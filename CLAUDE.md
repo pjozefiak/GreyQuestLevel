@@ -43,9 +43,11 @@ These are deliberate, not defensive clutter. Preserve them:
   inside `pcall`.
 - **Event registration is wrapped in `pcall`** (`SafeRegister`). Registering an event this
   client doesn't know throws and aborts the whole file load.
-- **`SavedVariables` do not round-trip.** The beta writes `GrayQuestLevelDB` on exit but never
-  reads it back (client bug), so saved position/offset are lost each launch. Don't try to fix
-  this addon-side.
+- **`SavedVariables` work.** Earlier beta builds wrote them but never read them back; that is
+  fixed. Two DBs, both initialised with the `X = X or {}` idiom at file scope (saved variables
+  are loaded before the addon's Lua runs): `GrayQuestLevelDB` is account-wide (position,
+  source, offset) and `GrayQuestLevelCharDB` is per character (the challenge state). A new
+  saved table needs a `## SavedVariables*` line in the `.toc` *and* a `.luacheckrc` entry.
 - **Display-only addon** — no secure snippets, no combat log, no aura reads. Keep it that way;
   that's why Midnight-era restrictions don't apply.
 

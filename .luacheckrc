@@ -22,7 +22,7 @@ exclude_files = {
 read_globals = {
 	-- namespaces / tables
 	"C_AddOns", "C_ChatInfo", "C_Container", "C_CVar", "C_Item", "C_Map",
-	"C_MythicPlus", "C_ChallengeMode", "C_Spell", "C_Timer", "C_Texture",
+	"C_MythicPlus", "C_ChallengeMode", "C_Spell", "C_Timer", "C_Texture", "C_QuestLog",
 	"C_UnitAuras", "Enum", "Settings", "LibStub", "Constants",
 
 	-- frames / UI
@@ -66,6 +66,7 @@ read_globals = {
 -- Globals the addon is allowed to create or overwrite (saved variables, etc.).
 globals = {
 	"GrayQuestLevelDB",      -- ## SavedVariables in the .toc
+	"GrayQuestLevelCharDB",  -- ## SavedVariablesPerCharacter in the .toc
 	"SLASH_GRAYQUESTLEVEL1", -- how /gql is registered
 	"SlashCmdList",          -- the handler is installed as a field on it
 }
